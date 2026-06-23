@@ -22,7 +22,7 @@ void enc4b6b(uint8_t byte_val, uint8_t &hi, uint8_t &lo) {
 #define PREAMBLE_BYTE      0x2A
 #define PREAMBLE_BYTES_TX  12
 #define PREAMBLE_BYTES_ACK 12
-#define TIMEOUT_MS         5000
+#define TIMEOUT_MS         3000
 #define RX_SETTLE_MS       200
 #define FLAG_BYTE          0x7E
 #define RX_PIN             26
@@ -89,9 +89,16 @@ uint8_t crc8(const Frame &frame) {
   return crc;
 }
 
-// Livro de estudo
+// Cabeça do leão 5x8 pixels
 const uint8_t custom_char[] = {
-  0x00, 0x0F, 0x15, 0x15, 0x15, 0x15, 0x1F, 0x00
+  0x0E,  // 01110  juba topo
+  0x1F,  // 11111  juba
+  0x15,  // 10101  olhos
+  0x1F,  // 11111  focinho
+  0x0A,  // 01010  bigodes
+  0x0E,  // 01110  queixo
+  0x04,  // 00100  pescoço
+  0x00   // 00000  vazio
 };
 
 inline void txPowerOn() {
@@ -101,7 +108,7 @@ inline void txPowerOn() {
 
 inline void txPowerOff() {
   digitalWrite(TX_VCC_PIN, LOW);
-  delay(20);
+  delay(200);
 }
 
 bool readRawByte(uint8_t &out, uint32_t timeoutMs = TIMEOUT_MS) {
@@ -161,7 +168,7 @@ void sendFrame(const Frame &frame) {
 }
 
 uint8_t receiveACK() {
-  if (!waitForFlag(5000)) {
+  if (!waitForFlag()) {
     Serial.println("[TX] Timeout aguardando flag do ACK");
     return 0xFF;
   }
@@ -174,9 +181,6 @@ uint8_t receiveACK() {
 
   if (type_raw != Type::ACK) {
     Serial.printf("[TX] Tipo inesperado: %d (esperava ACK)\n", type_raw);
-    // Drena o restante e tenta de novo
-    delay(100);
-    while (Serial2.available()) Serial2.read();
     return 0xFF;
   }
 
@@ -203,29 +207,27 @@ uint8_t receiveACK() {
 }
 
 void sendWithARQ(const Frame &frame) {
-  uint8_t tentativas = 0;
-  while (tentativas < 10) {
-    sendFrame(frame);
-    Serial.printf("[TX] Enviado seq=%d tipo=%d len=%d (tentativa %d)\n",
-                  frame.seq, frame.type, frame.len, tentativas + 1);
+  sendFrame(frame);
+  Serial.printf("[TX] Enviado seq=%d tipo=%d len=%d\n", frame.seq, frame.type, frame.len);
 
-    uint32_t t0 = millis();
-    while (millis() - t0 < TIMEOUT_MS) {
-      if (!Serial2.available()) continue;
+  uint32_t t0 = millis();
+  while (millis() - t0 < TIMEOUT_MS) {
+    if (!Serial2.available()) continue;
 
-      uint8_t ackSeq = receiveACK();
-      if (ackSeq == frame.seq) {
-        Serial.printf("[TX] ACK confirmado seq=%d\n", ackSeq);
-        return;
-      }
-      if (ackSeq != 0xFF) {
-        Serial.printf("[TX] ACK seq errado: %d (esperava %d)\n", ackSeq, frame.seq);
-      }
+    uint8_t ackSeq = receiveACK();
+    if (ackSeq == 0xFF) {
+      Serial.println("[TX] ACK inválido — retransmitindo");
+      sendFrame(frame);
+      t0 = millis();
+      continue;
     }
-    tentativas++;
-    Serial.printf("[TX] Timeout — retransmitindo (tentativa %d)\n", tentativas + 1);
+    if (ackSeq == frame.seq) {
+      Serial.printf("[TX] ACK confirmado seq=%d\n", ackSeq);
+      return;
+    }
   }
-  Serial.println("[TX] Falha após 10 tentativas");
+  Serial.printf("[TX] Timeout — retransmitindo seq=%d\n", frame.seq);
+  sendWithARQ(frame);
 }
 
 void setup() {
@@ -236,9 +238,10 @@ void setup() {
   txPowerOff();
 
   Serial.println("[TX] Transmissor pronto!");
-  Serial.println("  Digite uma mensagem (max 16 chars) + Enter para enviar texto");
-  Serial.println("  Digite 'IMG' para enviar livro");
-  Serial.println("  Digite 'END' para encerrar");
+  Serial.println("[TX] Comandos:");
+  Serial.println("  Digite uma mensagem (max 16 chars) e pressione Enter para enviar");
+  Serial.println("  Digite 'IMG' para enviar a imagem");
+  Serial.println("  Digite 'END' para encerrar transmissao");
 }
 
 uint8_t seq = 0;
@@ -248,6 +251,7 @@ void loop() {
 
   String entrada = Serial.readStringUntil('\n');
   entrada.trim();
+
   if (entrada.length() == 0) return;
 
   if (entrada.equalsIgnoreCase("END")) {
@@ -266,7 +270,7 @@ void loop() {
   }
 
   if (entrada.length() > 16) {
-    Serial.println("[TX] ERRO: max 16 caracteres");
+    Serial.println("[TX] ERRO: mensagem muito longa (max 16 caracteres)");
     return;
   }
 
